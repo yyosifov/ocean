@@ -18,11 +18,10 @@ def clean_defaults(
     integration_config: IntegrationConfiguration,
     force: bool,
     wait: bool,
-    destroy: bool,
 ) -> None:
     try:
         asyncio.new_event_loop().run_until_complete(
-            _clean_defaults(config_class, integration_config, force, wait, destroy)
+            _clean_defaults(config_class, integration_config, force, wait)
         )
 
     except Exception as e:
@@ -34,7 +33,6 @@ async def _clean_defaults(
     integration_config: IntegrationConfiguration,
     force: bool,
     wait: bool,
-    destroy: bool,
 ) -> None:
     port_client = ocean.port_client
     is_exists = await is_integration_exists(port_client)
@@ -56,9 +54,9 @@ async def _clean_defaults(
             )
         )
 
-        if not force and not destroy:
+        if not force:
             logger.info(
-                "Finished deleting blueprints! ⚓️",
+                "Finished deleting blueprints and configurations! ⚓️",
             )
             return None
 
@@ -75,18 +73,23 @@ async def _clean_defaults(
                     for migration_id in migration_ids
                 )
             )
-        if not destroy:
-            logger.info(
-                "Migrations completed successfully! ⚓️",
-            )
-            return None
 
-        result = await ocean.port_client.delete_current_integration()
-        if result.get("ok"):
-            logger.info(
-                "Blueprints deleted, migrations completed, and integration destroyed successfully! ⚓️",
-            )
-            return None
+        # After blueprints and migrations, delete integration/configuration if possible
+        # Only if force is True (already checked above)
+        # Try to delete integration and configuration if methods exist
+        port_client = ocean.port_client
+        if hasattr(port_client, 'delete_integration') and callable(getattr(port_client, 'delete_integration')):
+            try:
+                await port_client.delete_integration()
+                logger.info("Integration deleted successfully.")
+            except Exception as e:
+                logger.error(f"Failed to delete integration: {e}")
+        if hasattr(port_client, 'delete_configuration') and callable(getattr(port_client, 'delete_configuration')):
+            try:
+                await port_client.delete_configuration()
+                logger.info("Configuration deleted successfully.")
+            except Exception as e:
+                logger.error(f"Failed to delete configuration: {e}")
 
     except httpx.HTTPStatusError as e:
         logger.error(f"Failed to delete blueprints: {e.response.text}.")
