@@ -37,9 +37,6 @@ class ArgocdClient:
         self.api_auth_header = {"Authorization": f"Bearer {self.token}"}
         if self.allow_insecure:
             # This is not recommended for production use
-            logger.warning(
-                "Insecure mode is enabled. This will disable SSL verification for the ArgoCD API client, which is not recommended for production use."
-            )
             self.http_client = httpx.AsyncClient(verify=False)
         else:
             self.http_client = http_async_client
@@ -79,10 +76,25 @@ class ArgocdClient:
             raise e
 
     async def get_resources(self, resource_kind: ObjectKind) -> list[dict[str, Any]]:
+        """Fetch resources of a given kind from the ArgoCD API.
+
+        The ArgoCD API is expected to return a JSON response with an ``items`` field
+        that contains the list of the requested resources. In some scenarios the
+        response might not include this key (for example when no resources of the
+        requested kind exist or when the server returns an error message
+        structure). Accessing the key directly would raise a ``KeyError`` and stop
+        the entire sync process.
+
+        To make the integration more resilient we access the key using
+        ``dict.get`` which safely returns ``None`` when the key is absent. We then
+        fallback to an empty list so the caller can continue processing without
+        special-casing error handling.
+        """
         url = f"{self.api_url}/{resource_kind}s"
         try:
             response_data = await self._send_api_request(url=url)
-            return response_data["items"] or []
+            # Use .get to avoid KeyError when 'items' key is missing
+            return response_data.get("items", [])
         except Exception as e:
             logger.error(f"Failed to fetch resources of kind {resource_kind}: {e}")
             if self.ignore_server_error:
