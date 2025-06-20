@@ -46,8 +46,32 @@ class JQEntityProcessor(BaseEntityProcessor):
 
     @lru_cache
     def _compile(self, pattern: str) -> Any:
-        if not ocean.config.allow_environment_variables_jq_access:
+        """Return a compiled jq program with optional helpers.
+
+        Adds:
+        * A stub `env` when environment access is disabled.
+        * A pure-jq implementation of the `IN` filter for runtimes < jq 1.6.
+        """
+        import re
+
+        allow_env_access = True
+        try:
+            allow_env_access = ocean.config.allow_environment_variables_jq_access
+        except Exception:
+            allow_env_access = True  # default behaviour
+
+        if not allow_env_access:
             pattern = "def env: {}; {} as $ENV | " + pattern
+
+        if "IN(" in pattern:
+            def _wrap_in(match: re.Match) -> str:
+                args = match.group(1)
+                return f"IN([{args}])"
+
+            pattern = re.sub(r"IN\(([^)]*)\)", _wrap_in, pattern)
+            in_def = "def IN($vals): . as $item | any($vals[]; . == $item); "
+            pattern = in_def + pattern
+
         return jq.compile(pattern)
 
     @staticmethod
