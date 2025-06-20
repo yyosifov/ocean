@@ -38,14 +38,39 @@ class TokenRetryTransport(RetryTransport):
         return await super()._should_retry_async(response)
 
     def _should_retry(self, response: httpx.Response) -> bool:
+        """Decide synchronously whether to retry the request.
+
+        If the response signals an expired or invalid token we first refresh it.
+        Without a running event loop we call ``asyncio.run`` directly; otherwise
+        the coroutine runs in a helper thread so the current loop keeps running.
+        """
         if self.is_token_error(response):
             if self._logger:
                 self._logger.info(
-                    "Got unauthorized response, trying to refresh token before retrying"
+                    "Got unauthorized response, refreshing token before retry"
                 )
-            asyncio.get_running_loop().run_until_complete(
-                self._handle_unauthorized(response)
-            )
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # No active loop.
+                asyncio.run(self._handle_unauthorized(response))
+            else:
+                # Inside an event loop – refresh in a separate thread.
+                import threading
+
+                exception_holder: list[Exception] = []
+
+                def _runner() -> None:
+                    try:
+                        asyncio.run(self._handle_unauthorized(response))
+                    except Exception as exc:  # pragma: no cover
+                        exception_holder.append(exc)
+
+                thread = threading.Thread(target=_runner, name="token-refresh-thread")
+                thread.start()
+                thread.join()
+                if exception_holder:
+                    raise exception_holder[0]
 
             return True
         return super()._should_retry(response)
