@@ -1,4 +1,4 @@
-# Ocean fork by Yosko Beatz 🔊
+# Ocean fork by Yosko Beatz 🔊, powered by Duracell
 
 <img src="./assets/Thumbnail.png" alt="Ocean">
 
