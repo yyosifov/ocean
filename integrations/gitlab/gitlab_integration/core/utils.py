@@ -14,15 +14,17 @@ def does_pattern_apply(patterns: Union[str, List[str]], string: str) -> bool:
         patterns = [patterns]
 
     for pattern in patterns:
+        # Build additional variants to support '**/' prefix and trailing '/'.
+        variants: list[str] = [pattern]
+
         if pattern.startswith("**/"):
-            # Also try the pattern without '**/' to allow matching a bare filename.
-            bare_pattern = pattern.replace("**/", "", 1)
-            if fnmatch.fnmatch(string, pattern) or fnmatch.fnmatch(
-                string, bare_pattern
-            ):
-                return True
-        else:
-            if fnmatch.fnmatch(string, pattern):
+            variants.append(pattern.replace("**/", "", 1))
+
+        if pattern.endswith("/"):
+            variants.append(pattern.rstrip("/"))
+
+        for candidate in variants:
+            if fnmatch.fnmatch(string, candidate):
                 return True
 
     return False
