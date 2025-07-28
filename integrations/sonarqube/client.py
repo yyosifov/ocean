@@ -203,6 +203,8 @@ class SonarQubeClient:
 
         :return: A list of components associated with the specified organization.
         """
+        if query_params is None:
+            query_params = {}
         if self.organization_id:
             logger.info(
                 f"Fetching all components in organization: {self.organization_id}"
@@ -214,8 +216,10 @@ class SonarQubeClient:
             )
 
         try:
+            # Select appropriate endpoint based on deployment type
+            selected_endpoint = "components/search" if self.is_onpremise else Endpoints.COMPONENTS
             async for components in self._send_paginated_request(
-                endpoint=Endpoints.COMPONENTS,
+                endpoint=selected_endpoint,
                 data_key="components",
                 method="GET",
                 query_params=query_params,
@@ -565,6 +569,10 @@ class SonarQubeClient:
             logger.info(
                 f"Fetching all portfolios in organization: {self.organization_id}"
             )
+
+            if self.is_onpremise:
+                logger.debug("Skipping portfolio retrieval – self-hosted SonarQube does not support the views API.")
+                return
             portfolios = await self._get_all_portfolios()
             portfolio_keys_chunks = turn_sequence_to_chunks(
                 [portfolio["key"] for portfolio in portfolios], MAX_PORTFOLIO_REQUESTS
