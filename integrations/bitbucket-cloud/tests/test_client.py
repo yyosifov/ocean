@@ -270,3 +270,43 @@ async def test_get_pull_requests(mock_client: BitbucketClient) -> None:
                 f"{mock_client.base_url}/repositories/{mock_client.workspace}/test-repo/pullrequests",
                 params={"state": "OPEN", "pagelen": 50},
             )
+
+@pytest.mark.asyncio
+async def test_httpbaseclient_prefixed_absolute_url_causes_issue(monkeypatch):
+    """Demonstrate that HTTPBaseClient.send_api_request prefixes base_url when given an absolute URL path."""
+    # Import here to ensure monkeypatch works on the module used in HTTPBaseClient
+    from gitlab.clients.base_client import HTTPBaseClient
+
+    # Dummy AuthClient to avoid external dependencies
+    class DummyAuth:
+        def __init__(self, token):
+            pass
+
+        def get_headers(self):
+            return {}
+
+    monkeypatch.setattr("gitlab.clients.base_client.AuthClient", DummyAuth)
+
+    # Create a mock http client and patch the module-level http_async_client used by HTTPBaseClient
+    mock_http_client = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"values": []}
+    mock_http_client.request = AsyncMock(return_value=mock_response)
+    monkeypatch.setattr("gitlab.clients.base_client.http_async_client", mock_http_client)
+
+    # Initialize client and call send_api_request with an absolute URL as path
+    client = HTTPBaseClient(base_url="https://api.example.com", token="token", endpoint="api")
+    absolute_next = "https://api.example.com/repos/test?page=2"
+
+    await client.send_api_request(method="GET", path=absolute_next)
+
+    # Expectation: underlying http client's request should be called with the absolute URL.
+    # Current implementation prefixes base_url which causes incorrect behavior; this assertion will fail.
+    mock_http_client.request.assert_called_with(
+        method="GET",
+        url=absolute_next,
+        headers={},
+        params=None,
+        json=None,
+    )
