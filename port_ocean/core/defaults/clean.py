@@ -47,14 +47,23 @@ async def _clean_defaults(
         return None
 
     try:
-        delete_result = await asyncio.gather(
-            *(
-                port_client.delete_blueprint(
-                    blueprint["identifier"], should_raise=True, delete_entities=force
-                )
-                for blueprint in defaults.blueprints
+        # Build deletion tasks for blueprints and actions so they are removed together
+        deletion_tasks = [
+            port_client.delete_blueprint(
+                blueprint["identifier"], should_raise=True, delete_entities=force
             )
+            for blueprint in getattr(defaults, "blueprints", [])
+        ]
+
+        # NEW: also delete actions contained in the defaults
+        deletion_tasks.extend(
+            port_client.delete_action(
+                action["identifier"], should_raise=True, delete_entities=force
+            )
+            for action in getattr(defaults, "actions", [])
         )
+
+        delete_result = await asyncio.gather(*deletion_tasks) if deletion_tasks else []
 
         if not force and not destroy:
             logger.info(
@@ -76,6 +85,12 @@ async def _clean_defaults(
                 )
             )
         if not destroy:
+            # Clear integration config when force cleaning defaults
+            if force:
+                try:
+                    await port_client.patch_integration(port_app_config=config_class(**{}))
+                except Exception as e:
+                    logger.error(f"Failed to clear integration config: {e}")
             logger.info(
                 "Migrations completed successfully! ⚓️",
             )
