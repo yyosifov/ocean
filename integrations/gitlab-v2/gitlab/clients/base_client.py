@@ -4,6 +4,7 @@ import httpx
 from loguru import logger
 from port_ocean.utils import http_async_client
 
+
 from gitlab.clients.auth_client import AuthClient
 
 
@@ -22,7 +23,10 @@ class HTTPBaseClient:
         params: Optional[dict[str, Any]] = None,
         data: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        url = f"{self.base_url}/{path}"
+        if path.startswith(("http://", "https://")):
+            url = path
+        else:
+            url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         logger.debug(f"Sending {method} request to {url}")
 
         try:
