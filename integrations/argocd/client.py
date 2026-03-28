@@ -37,9 +37,6 @@ class ArgocdClient:
         self.api_auth_header = {"Authorization": f"Bearer {self.token}"}
         if self.allow_insecure:
             # This is not recommended for production use
-            logger.warning(
-                "Insecure mode is enabled. This will disable SSL verification for the ArgoCD API client, which is not recommended for production use."
-            )
             self.http_client = httpx.AsyncClient(verify=False)
         else:
             self.http_client = http_async_client
@@ -82,7 +79,12 @@ class ArgocdClient:
         url = f"{self.api_url}/{resource_kind}s"
         try:
             response_data = await self._send_api_request(url=url)
-            return response_data["items"] or []
+            if "items" not in response_data or not isinstance(response_data["items"], list):
+                logger.warning(
+                    f"Invalid 'items' in {resource_kind} response; returning empty list. Response: {response_data}"
+                )
+                return []
+            return response_data["items"]
         except Exception as e:
             logger.error(f"Failed to fetch resources of kind {resource_kind}: {e}")
             if self.ignore_server_error:
@@ -125,5 +127,16 @@ class ArgocdClient:
     ) -> list[dict[str, Any]]:
         logger.info(f"Fetching managed resources for application: {application_name}")
         url = f"{self.api_url}/{ObjectKind.APPLICATION}s/{application_name}/managed-resources"
-        managed_resources = (await self._send_api_request(url=url)).get("items", [])
-        return managed_resources
+        try:
+            response_data = await self._send_api_request(url=url)
+            if "items" not in response_data or not isinstance(response_data["items"], list):
+                logger.warning(
+                    f"Invalid 'items' in managed-resources for {application_name}; returning empty list. Response: {response_data}"
+                )
+                return []
+            return response_data["items"]
+        except Exception as e:
+            logger.error(f"Failed to fetch managed resources for application {application_name}: {e}")
+            if self.ignore_server_error:
+                return []
+            raise e
