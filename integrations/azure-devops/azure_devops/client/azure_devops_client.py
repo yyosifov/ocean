@@ -84,9 +84,11 @@ class AzureDevopsClient(HTTPBaseClient):
             "new",
             "createPending",
         }
-        return repository.get("project", {}).get(
-            "state"
-        ) not in UNHEALTHY_PROJECT_STATES and not repository.get("isDisabled")
+        project_state_ok = repository.get("project", {}).get("state") not in UNHEALTHY_PROJECT_STATES
+        # If ``isDisabled`` is absent, assume the repository is disabled and unhealthy.
+        is_disabled_flag = repository.get("isDisabled")
+        is_repo_enabled = is_disabled_flag is False  # Only explicitly *False* is considered enabled
+        return project_state_ok and is_repo_enabled
 
     async def get_single_project(self, project_id: str) -> dict[str, Any] | None:
         project_url = (
