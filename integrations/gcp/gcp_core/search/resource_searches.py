@@ -326,10 +326,9 @@ async def feed_event_to_resource(
 ) -> RAW_ITEM:
     resource = None
     if asset_data.get("deleted") is True:
-        resource = asset_data["priorAsset"]["resource"]["data"]
-        resource[EXTRA_PROJECT_FIELD] = await get_single_project(
-            project_id, project_rate_limiter, project_semaphore, config
-        )
+        # For delete events, use prior asset data and add a minimal project stub to avoid extra API calls.
+        resource = asset_data["priorAsset"]["resource"]["data"] or {}
+        resource[EXTRA_PROJECT_FIELD] = {"name": project_id}
     else:
         match asset_type:
             case AssetTypesWithSpecialHandling.TOPIC:
