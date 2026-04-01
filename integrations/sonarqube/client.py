@@ -1,9 +1,9 @@
 import asyncio
 import base64
+from typing import Any, AsyncGenerator, Generator, Optional, cast
+
 import httpx
 from loguru import logger
-from typing import Any, AsyncGenerator, Generator, Optional, cast
-from port_ocean.context.ocean import ocean
 from port_ocean.utils import http_async_client
 from port_ocean.utils.async_iterators import stream_async_iterators_tasks
 from port_ocean.utils.cache import cache_iterator_result
@@ -26,7 +26,6 @@ def turn_sequence_to_chunks(
 
 
 MAX_PORTFOLIO_REQUESTS = 20
-MAX_ISSUES_REQUESTS = 10000
 
 
 class Endpoints:
@@ -63,19 +62,16 @@ class SonarQubeClient:
         organization_id: str | None,
         app_host: str | None,
         is_onpremise: bool = False,
-        metrics: list[str] | None = None,
     ):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = base_url
         self.api_key = api_key
         self.organization_id = organization_id
-        self.app_host = app_host.rstrip("/") if app_host else None
+        self.app_host = app_host
         self.is_onpremise = is_onpremise
         self.http_client = http_async_client
         self.http_client.headers.update(self.api_auth_params["headers"])
-        self.metrics: list[str] = [] if not metrics else metrics
-        self.webhook_invoke_url = (
-            f"{self.app_host}/integration/webhook" if self.app_host else ""
-        )
+        self.metrics: list[str] = []
+        self.webhook_invoke_url = f"{self.app_host}/integration/webhook"
 
     @property
     def api_auth_params(self) -> dict[str, Any]:
@@ -159,17 +155,9 @@ class SonarQubeClient:
                 )  # SonarQube pageIndex starts at 1
                 page_size = paging_info.get("pageSize", PAGE_SIZE)
                 total_records = paging_info.get("total", 0)
+                logger.error("Fetching paginated data")
                 # Check if we have fetched all records
-                records_fetched = page_index * page_size
-                if records_fetched >= total_records:
-                    break
-                if (
-                    endpoint == Endpoints.ISSUES_SEARCH
-                    and records_fetched >= MAX_ISSUES_REQUESTS
-                ):
-                    logger.info(
-                        "The request exceeded the maximum number of issues that can be returned (10,000) from SonarQube API. Returning accumulated issues and skipping further results."
-                    )
+                if page_index * page_size >= total_records:
                     break
                 query_params["p"] = page_index + 1
         except httpx.HTTPStatusError as e:
@@ -199,19 +187,19 @@ class SonarQubeClient:
         query_params: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[list[dict[str, Any]], None]:
         """
-        Retrieve all components from SonarQube organization.
+        Retrieve all components (projects) from SonarQube.
 
-        :return: A list of components associated with the specified organization.
+        For SonarCloud (SaaS) the `components/search_projects` endpoint is used because it
+        supports the mandatory `organization` query parameter.  On self-hosted SonarQube
+        instances this endpoint does **not** exist and will return HTTP 404.  In that case we
+        transparently fall back to the more generic `projects/search` endpoint which is
+        available in both environments.
         """
-        if self.organization_id:
-            logger.info(
-                f"Fetching all components in organization: {self.organization_id}"
-            )
+        query_params = query_params or {}
 
-        if not self.is_onpremise:
-            logger.warning(
-                f"Received request to fetch SonarQube components with query_params {query_params}. Skipping because api_query_params is only supported on on-premise environments"
-            )
+        # Add organization id when it exists (SonarCloud)
+        if self.organization_id:
+            query_params.setdefault("organization", self.organization_id)
 
         try:
             async for components in self._send_paginated_request(
@@ -226,6 +214,21 @@ class SonarQubeClient:
                 yield await asyncio.gather(
                     *[self.get_single_project(project) for project in components]
                 )
+            return  # Successfully yielded all components, nothing more to do
+        except httpx.HTTPStatusError as e:
+            # If the specialised endpoint is unavailable (self-hosted) – switch to the generic one
+            if e.response is not None and e.response.status_code == 404:
+                logger.warning(
+                    "components/search_projects endpoint returned 404 – falling back to "
+                    "projects/search (self-hosted SonarQube detected)."
+                )
+                async for projects in self.get_projects(
+                    params=query_params, enrich_project=True
+                ):
+                    yield projects
+                return
+            # Re-raise for all other HTTP errors
+            raise
         except Exception as e:
             logger.error(f"Error occurred while fetching components: {e}")
             raise
@@ -253,8 +256,6 @@ class SonarQubeClient:
 
         :return: A list of measures associated with the specified component.
         """
-        if not self.metrics:
-            raise ValueError("metrics cannot be empty")
         logger.info(f"Fetching all measures in : {project_key}")
         response = await self._send_api_request(
             endpoint=Endpoints.MEASURES,
@@ -298,7 +299,8 @@ class SonarQubeClient:
 
         return project
 
-    async def get_custom_projects(
+    @cache_iterator_result()
+    async def get_projects(
         self, params: dict[str, Any] = {}, enrich_project: bool = False
     ) -> AsyncGenerator[list[dict[str, Any]], None]:
         if self.organization_id:
@@ -319,20 +321,6 @@ class SonarQubeClient:
             else:
                 yield projects
 
-    @cache_iterator_result()
-    async def get_projects(self) -> AsyncGenerator[list[dict[str, Any]], None]:
-        params = {}
-        if self.organization_id:
-            params["organization"] = self.organization_id
-
-        async for projects in self._send_paginated_request(
-            endpoint=Endpoints.PROJECTS,
-            data_key="components",
-            method="GET",
-            query_params=params,
-        ):
-            yield projects
-
     async def get_all_issues(
         self,
         query_params: dict[str, Any],
@@ -344,7 +332,7 @@ class SonarQubeClient:
         :return (list[Any]): A list containing issues data for all projects.
         """
 
-        async for components in self.get_custom_projects(
+        async for components in self.get_projects(
             params=project_query_params, enrich_project=False
         ):
             for component in components:
@@ -393,7 +381,7 @@ class SonarQubeClient:
 
         :return (list[Any]): A list containing analysis data for all components.
         """
-        async for components in self.get_projects():
+        async for components in self.get_projects(enrich_project=False):
             tasks = [
                 self.get_analysis_by_project(component=component)
                 for component in components
@@ -482,8 +470,6 @@ class SonarQubeClient:
     async def get_pull_request_measures(
         self, project_key: str, pull_request_key: str
     ) -> list[dict[str, Any]]:
-        if not self.metrics:
-            raise ValueError("metrics cannot be empty")
         logger.info(f"Fetching measures for pull request: {pull_request_key}")
         response = await self._send_api_request(
             endpoint=Endpoints.MEASURES,
@@ -522,7 +508,7 @@ class SonarQubeClient:
     async def get_all_sonarqube_analyses(
         self,
     ) -> AsyncGenerator[list[dict[str, Any]], None]:
-        async for components in self.get_projects():
+        async for components in self.get_projects(enrich_project=False):
             for analysis in await asyncio.gather(
                 *[
                     self.get_measures_for_all_pull_requests(
@@ -621,8 +607,7 @@ class SonarQubeClient:
         params = {}
         if self.organization_id:
             params["organization"] = self.organization_id
-        if ocean.integration_config["webhook_secret"]:
-            params["secret"] = ocean.integration_config["webhook_secret"]
+
         webhooks_response = await self._send_api_request(
             endpoint=f"{Endpoints.WEBHOOKS}/list",
             query_params={
@@ -630,6 +615,7 @@ class SonarQubeClient:
                 **params,
             },
         )
+
         webhooks = webhooks_response.get("webhooks", [])
         logger.info(webhooks)
 
@@ -637,6 +623,9 @@ class SonarQubeClient:
             logger.info(f"Webhook already exists in project: {project_key}")
             return {}
 
+        params = {}
+        if self.organization_id:
+            params["organization"] = self.organization_id
         return {
             "name": "Port Ocean Webhook",
             "project": project_key,
@@ -646,7 +635,6 @@ class SonarQubeClient:
     async def _create_webhooks_for_projects(
         self, webhook_payloads: list[dict[str, Any]]
     ) -> None:
-        print("Webhook url ", self.webhook_invoke_url)
         for webhook in webhook_payloads:
             await self._send_api_request(
                 endpoint=f"{Endpoints.WEBHOOKS}/create",
@@ -662,7 +650,7 @@ class SonarQubeClient:
         :return: None
         """
         logger.info(f"Subscribing to webhooks in organization: {self.organization_id}")
-        async for projects in self.get_projects():
+        async for projects in self.get_projects(enrich_project=False):
             webhooks_to_create = []
             for project in projects:
                 project_webhook_payload = (
