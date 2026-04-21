@@ -1,6 +1,7 @@
 import asyncio
 from asyncio import Task
 from dataclasses import dataclass, field
+
 from functools import lru_cache
 from typing import Any, Optional
 import jq  # type: ignore
@@ -21,6 +22,49 @@ from port_ocean.core.utils.utils import (
 )
 from port_ocean.exceptions.core import EntityProcessorException
 from port_ocean.utils.queue_utils import process_in_queue
+
+
+class ExampleStates:
+    __succeed: list[dict[str, Any]]
+    __errors: list[dict[str, Any]]
+    __max_size: int
+
+    def __init__(self, max_size: int = 0) -> None:
+        """
+        Store two sequences:
+          - succeed: items that succeeded
+          - errors:  items that failed
+        """
+        self.__succeed = []
+        self.__errors = []
+        self.__max_size = max_size
+
+    def add_example(self, succeed: bool, item: dict[str, Any]) -> None:
+        if succeed:
+            self.__succeed.append(item)
+        else:
+            self.__errors.append(item)
+
+    def __len__(self) -> int:
+        """
+        Total number of items (successes + errors).
+        """
+        return len(self.__succeed) + len(self.__errors)
+
+    def get_examples(self, number: int = 0) -> list[dict[str, Any]]:
+        """
+        Return a list of up to number items, taking successes first,
+        """
+        if number <= 0:
+            number = self.__max_size
+        # how many from succeed?
+        s_count = min(number, len(self.__succeed))
+        result = list(self.__succeed[:s_count])
+        # how many more from errors?
+        e_count = number - s_count
+        if e_count > 0:
+            result.extend(self.__errors[:e_count])
+        return result
 
 
 @dataclass
@@ -46,9 +90,42 @@ class JQEntityProcessor(BaseEntityProcessor):
 
     @lru_cache
     def _compile(self, pattern: str) -> Any:
-        if not ocean.config.allow_environment_variables_jq_access:
-            pattern = "def env: {}; {} as $ENV | " + pattern
-        return jq.compile(pattern)
+        """
+        Compile a JQ pattern with a conservative normalization fallback.
+
+        Rationale:
+        When mappings are authored in YAML using single quotes, users often
+        include backslash-escaped double quotes (e.g. '\"text\"') or use
+        single-quoted empty strings inside JQ expressions (''), which are not
+        valid JQ syntax. In such cases, a direct compile would fail.
+
+        Here we first try to compile the pattern as-is. If compilation fails,
+        we apply a minimal normalization and retry:
+          - replace \" with "
+          - replace '' with ""
+        This mirrors common YAML quoting artifacts and preserves backward
+        compatibility by only kicking in on initial failure.
+        """
+
+        def _apply_env_prefix(p: str) -> str:
+            if not ocean.config.allow_environment_variables_jq_access:
+                return "def env: {}; {} as $ENV | " + p
+            return p
+
+        try:
+            return jq.compile(_apply_env_prefix(pattern))
+        except Exception as exc:
+            normalized_pattern = pattern.replace('\\"', '"').replace("''", '""')
+            if normalized_pattern != pattern:
+                try:
+                    logger.debug(
+                        "JQ compile failed, retrying with normalized pattern. "
+                        f"original='{pattern}', normalized='{normalized_pattern}', error='{exc}'"
+                    )
+                    return jq.compile(_apply_env_prefix(normalized_pattern))
+                except Exception:
+                    pass
+            raise
 
     @staticmethod
     def _stop_iterator_handler(func: Any) -> Any:
@@ -182,11 +259,16 @@ class JQEntityProcessor(BaseEntityProcessor):
             return MappedEntity(
                 mapped_entity,
                 did_entity_pass_selector=should_run,
-                raw_data=data if should_run else None,
+                raw_data=data,
                 misconfigurations=misconfigurations,
             )
 
-        return MappedEntity()
+        return MappedEntity(
+            {},
+            did_entity_pass_selector=False,
+            raw_data=data,
+            misconfigurations={},
+        )
 
     async def _calculate_entity(
         self,
@@ -264,24 +346,26 @@ class JQEntityProcessor(BaseEntityProcessor):
 
         passed_entities = []
         failed_entities = []
-        examples_to_send: list[dict[str, Any]] = []
+        examples_to_send = ExampleStates(send_raw_data_examples_amount)
         entity_misconfigurations: dict[str, str] = {}
         missing_required_fields: bool = False
         entity_mapping_fault_counter: int = 0
-
         for result in calculated_entities_results:
             if len(result.misconfigurations) > 0:
                 entity_misconfigurations |= result.misconfigurations
+
+            if (
+                len(examples_to_send) < send_raw_data_examples_amount
+                and result.raw_data is not None
+            ):
+                examples_to_send.add_example(
+                    result.did_entity_pass_selector, result.raw_data
+                )
 
             if result.entity.get("identifier") and result.entity.get("blueprint"):
                 parsed_entity = Entity.parse_obj(result.entity)
                 if result.did_entity_pass_selector:
                     passed_entities.append(parsed_entity)
-                    if (
-                        len(examples_to_send) < send_raw_data_examples_amount
-                        and result.raw_data is not None
-                    ):
-                        examples_to_send.append(result.raw_data)
                 else:
                     failed_entities.append(parsed_entity)
             else:
@@ -294,20 +378,10 @@ class JQEntityProcessor(BaseEntityProcessor):
             entity_mapping_fault_counter,
         )
 
-        if (
-            not calculated_entities_results
-            and raw_results
-            and send_raw_data_examples_amount > 0
-        ):
-            logger.warning(
-                f"No entities were parsed from {len(raw_results)} raw results, sending raw data examples"
-            )
-            examples_to_send = raw_results[:send_raw_data_examples_amount]
-
-        await self._send_examples(examples_to_send, mapping.kind)
+        await self._send_examples(examples_to_send.get_examples(), mapping.kind)
 
         return CalculationResult(
             EntitySelectorDiff(passed=passed_entities, failed=failed_entities),
             errors,
-            misonfigured_entity_keys=entity_misconfigurations,
+            misconfigured_entity_keys=entity_misconfigurations,
         )
